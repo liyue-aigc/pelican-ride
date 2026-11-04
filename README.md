@@ -65,6 +65,7 @@ python -m http.server 8765 --bind 127.0.0.1
 ```
 .
 ├── index.html                 页面、HUD、菜单、触控与样式
+├── favicon.svg                站点图标（内联图形，无外部素材）
 ├── src/
 │   ├── game.js                主循环、状态机、碰撞、计分、输入
 │   ├── world.js               沿海场景与海面 shader
