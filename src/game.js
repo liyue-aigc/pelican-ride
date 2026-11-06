@@ -304,6 +304,7 @@ function gameOver() {
   ui.rDist.textContent = Math.floor(lastDist) + 'm';
   ui.rBest.textContent = best.toLocaleString('zh-CN');
   ui.newBest.classList.toggle('hidden', !isNew);
+  if (isNew) burstConfetti();
   ui.overTitle.textContent = isNew ? '新纪录！' : (lastFinal > best * 0.6 ? '骑得不错！' : '再来一局？');
   // 本局新解锁的成就
   const newly = meta.endRun();
@@ -321,6 +322,27 @@ function gameOver() {
   }
   updateMenuStats();
   audio.over();
+}
+// 新纪录撒花
+function burstConfetti() {
+  // 挂在 #app 顶层（z-index 高于结算面板），避免被面板的背景模糊糊掉
+  const layer = $('app');
+  if (!layer) return;
+  const colors = ['#ffb703', '#ff6b6b', '#2ec4a6', '#0e8fd6', '#b5179e', '#ffd36b', '#ff8a1e'];
+  for (let i = 0; i < 40; i++) {
+    const c = document.createElement('i');
+    c.className = 'confetti';
+    c.style.position = 'absolute';
+    c.style.zIndex = '60';
+    c.style.left = (6 + Math.random() * 88) + '%';
+    c.style.background = colors[i % colors.length];
+    c.style.setProperty('--dx', (Math.random() * 180 - 90) + 'px');
+    c.style.setProperty('--spin', (Math.random() > 0.5 ? 1 : -1) * (360 + Math.random() * 540) + 'deg');
+    c.style.setProperty('--dur', (2.1 + Math.random() * 1.6) + 's');
+    c.style.animationDelay = (Math.random() * 0.35) + 's';
+    layer.appendChild(c);
+    setTimeout(() => c.remove(), 4300);
+  }
 }
 function saveScore() {
   const name = (ui.playerName.value || '').trim().slice(0, 8) || '无名骑手';
