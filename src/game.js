@@ -3,6 +3,8 @@ import { clamp, lerp, rand, V3, mergeColored } from './utils.js';
 import { createWorld } from './world.js';
 import { createPlayer } from './player.js';
 import { createEffects } from './effects.js';
+import { createAudio } from './audio.js';
+import { createMeta, boardQualifies, boardAdd, getName, setName, loadBoard } from './meta.js';
 
 const $ = (id) => document.getElementById(id);
 const ui = {
@@ -11,39 +13,54 @@ const ui = {
   combo: $('combo'), hearts: $('hearts'), energy: $('energy-fill'), cam: $('btn-cam'),
   powerup: $('powerup'), speedlines: $('speedlines'), flash: $('flash'), damage: $('damage'),
   floatLayer: $('float-layer'), hint: $('hint'),
-  menuBest: $('menu-best'), rScore: $('r-score'), rCoins: $('r-coins'), rDist: $('r-dist'),
+  menuBest: $('menu-best'), menuSummary: $('menu-summary'),
+  rScore: $('r-score'), rCoins: $('r-coins'), rDist: $('r-dist'),
   rBest: $('r-best'), newBest: $('new-best'), overTitle: $('over-title'),
-  rotateHint: $('rotate-hint'),
+  rAchv: $('r-achv'), nameRow: $('name-row'), playerName: $('player-name'),
+  btnSaveScore: $('btn-save-score'), rRank: $('r-rank'),
+  rotateHint: $('rotate-hint'), intro: $('intro-text'), sound: $('btn-sound'),
+  screenBoard: $('screen-board'), screenAchv: $('screen-achv'),
 };
 
 const MAX_HP = 3;
+const audio = createAudio();
+const meta = createMeta();
+meta.setOnUnlock(() => audio.achv());
+
+const coarse = !!(window.matchMedia && window.matchMedia('(pointer:coarse)').matches);
+
 const renderer = new THREE.WebGLRenderer({ canvas: ui.canvas, antialias: true, powerPreference: 'high-performance' });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
 renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(64, 1, 0.1, 700);
-const world = createWorld(scene);
+const world = createWorld(scene, { coarse, anisotropy: renderer.capabilities.getMaxAnisotropy() });
 const player = createPlayer(scene);
 const fx = createEffects(scene);
 
-const coinGeo = new THREE.CylinderGeometry(0.36, 0.36, 0.085, 16);
-const coinMat = new THREE.MeshStandardMaterial({ color: 0xffc832, metalness: 0.72, roughness: 0.26, emissive: 0x7a4a00, emissiveIntensity: 0.35 });
+// ---------- 金币 ----------
+const coinGeo = new THREE.CylinderGeometry(0.36, 0.36, 0.085, 18);
+const coinMat = new THREE.MeshStandardMaterial({ color: 0xffcf3d, metalness: 0.18, roughness: 0.34, emissive: 0xffa518, emissiveIntensity: 0.42 });
 const COIN_N = 64;
 const coins = [];
 for (let i = 0; i < COIN_N; i++) {
   const pivot = new THREE.Group();
   const mesh = new THREE.Mesh(coinGeo, coinMat);
   mesh.rotation.x = Math.PI / 2;
+  mesh.castShadow = true;
   pivot.add(mesh);
   scene.add(pivot);
   coins.push({ pivot, x: 0, y: 1.1, z: -100, state: 'idle', spin: rand(0, 6.28) });
 }
 
+// ---------- 障碍 ----------
 function obstacleGeometry(kind) {
   if (kind === 0) {
-    const c = new THREE.ConeGeometry(0.36, 0.88, 8); c.translate(0, 0.48, 0);
-    const s = new THREE.CylinderGeometry(0.235, 0.265, 0.13, 8); s.translate(0, 0.52, 0);
+    const c = new THREE.ConeGeometry(0.36, 0.88, 10); c.translate(0, 0.48, 0);
+    const s = new THREE.CylinderGeometry(0.235, 0.265, 0.13, 10); s.translate(0, 0.52, 0);
     const b = new THREE.BoxGeometry(0.80, 0.09, 0.80); b.translate(0, 0.045, 0);
     return [{ g: b, color: 0x3a444e }, { g: c, color: 0xef7b24 }, { g: s, color: 0xf7f4e8 }];
   }
@@ -64,15 +81,17 @@ for (let i = 0; i < 3; i++) {
   parts.push({ g: shade, color: 0x3c4750 });
   obstacleGeos.push(mergeColored(parts));
 }
-const solidMat = new THREE.MeshLambertMaterial({ vertexColors: true });
+const solidMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.85 });
 const OBS_N = 16;
 const obstacles = [];
 for (let i = 0; i < OBS_N; i++) {
   const m = new THREE.Mesh(obstacleGeos[0], solidMat);
+  m.castShadow = true;
   scene.add(m);
   obstacles.push({ mesh: m, x: 0, z: -100, type: 0, hitDone: false });
 }
 
+// ---------- 道具 ----------
 const pickRingMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
 const pickRingHealthMat = new THREE.MeshBasicMaterial({ color: 0xffa9b8 });
 const pickRingGeo = new THREE.TorusGeometry(0.62, 0.05, 6, 20);
@@ -150,13 +169,14 @@ function resetPools() {
   for (const p of pickups) respawnPickup(p);
 }
 
+// ---------- 相机 ----------
 const CAM_MODES = [
   { name: '跟随', fov: 64 }, { name: '第一人称', fov: 78 }, { name: '侧跟拍', fov: 70 },
   { name: '俯视', fov: 58 }, { name: '自由', fov: 62 },
 ];
 function baseCamera() {
   const p = playerX, j = jumpY;
-  if (camIndex === 0) return { pos: V3(p * 0.45 + 2.5, 3.5 + j * 0.35, 8.8), look: V3(p * 0.65, 1.65, -11) };
+  if (camIndex === 0) return { pos: V3(p * 0.5 + 2.75, 2.55 + j * 0.30, 5.15), look: V3(p * 0.72 + 0.85, 1.82, -5.6) };
   if (camIndex === 1) return { pos: V3(p, 2.58 + j, -0.35), look: V3(p, 2.25 + j, -26) };
   if (camIndex === 2) return { pos: V3(7.2, 1.7, 2.2), look: V3(p * 0.3, 1.6, -5) };
   if (camIndex === 3) return { pos: V3(p * 0.3, 16, 12), look: V3(p * 0.4, 0, -16) };
@@ -187,6 +207,7 @@ function cameraFrame() {
   return { pos, look };
 }
 
+// ---------- 状态 ----------
 let state = 'menu';
 let playerX = 0, lean = 0, speed = 16, distance = 0, score = 0, coinCount = 0;
 let energy = 60, hp = MAX_HP, combo = 0, comboTimer = 0, multiplier = 1;
@@ -194,33 +215,15 @@ let boosting = false, magnetTime = 0, invuln = 0, shake = 0, elapsed = 0;
 let jumpY = 0, jumpVel = 0, grounded = true;
 let camIndex = 0, orbitYaw = 0, orbitPitch = 0, orbitDist = 1;
 let hudTick = 0, trailTick = 0, damagePulse = 0;
+let introT = 0;
 let touchLeft = false, touchRight = false, touchBoost = false;
+let lastFinal = 0, lastCoins = 0, lastDist = 0;
 const keys = Object.create(null);
 const camLook = new THREE.Vector3();
 let best = 0;
 try { best = Number(localStorage.getItem('pelican_ride_best_v1') || 0) || 0; } catch (e) { best = 0; }
 
-let actx = null;
-function ensureAudio() {
-  if (!actx) {
-    const AC = window.AudioContext || window.webkitAudioContext;
-    if (AC) actx = new AC();
-  }
-  if (actx && actx.state === 'suspended') actx.resume();
-}
-function tone(freq, dur, type, vol, slide) {
-  if (!actx) return;
-  const t = actx.currentTime;
-  const o = actx.createOscillator(), g = actx.createGain();
-  o.type = type || 'sine';
-  o.frequency.setValueAtTime(freq, t);
-  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(60, freq + slide), t + dur);
-  g.gain.setValueAtTime(vol || 0.07, t);
-  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-  o.connect(g); g.connect(actx.destination);
-  o.start(t); o.stop(t + dur + 0.02);
-}
-
+// ---------- 工具 ----------
 function floatText(x, y, z, text, color) {
   camera.updateMatrixWorld();
   const v = V3(x, y, z).project(camera);
@@ -251,6 +254,11 @@ function setState(s) {
   ui.over.classList.toggle('hidden', s !== 'gameover');
   ui.hud.classList.toggle('hidden', s === 'menu' || s === 'gameover');
   ui.touch.classList.toggle('hidden', s !== 'playing');
+  if (s === 'menu') updateMenuStats();
+}
+function updateMenuStats() {
+  ui.menuBest.textContent = best.toLocaleString('zh-CN');
+  if (ui.menuSummary) ui.menuSummary.textContent = meta.summary();
 }
 function resetGame() {
   playerX = 0; lean = 0; speed = 16; distance = 0; score = 0; coinCount = 0;
@@ -260,6 +268,7 @@ function resetGame() {
   camIndex = 0; orbitYaw = 0; orbitPitch = 0; orbitDist = 1;
   damagePulse = 0;
   world.reset(); fx.reset(); resetPools(); renderHearts();
+  meta.resetRun();
   const f = cameraFrame();
   camera.position.copy(f.pos);
   camLook.copy(f.look);
@@ -268,29 +277,62 @@ function resetGame() {
   updateHUD();
 }
 function startGame() {
-  ensureAudio();
+  audio.ensure();
   keys.Space = false;
   resetGame();
   setState('playing');
-  tone(520, 0.16, 'triangle', 0.07, 260);
+  // 开场镜头：从侧前方绕到跟随位
+  introT = 1.25;
+  camera.position.set(playerX + 7.5, 5.2, -13);
+  camLook.set(playerX, 1.8, 0);
+  if (ui.intro) {
+    ui.intro.classList.remove('show');
+    void ui.intro.offsetWidth;
+    ui.intro.classList.add('show');
+  }
+  audio.start();
 }
 function gameOver() {
   setState('gameover');
-  const final = Math.floor(score);
-  const isNew = final > best;
-  if (isNew) { best = final; try { localStorage.setItem('pelican_ride_best_v1', String(best)); } catch (e) { /* ignore */ } }
-  ui.rScore.textContent = final.toLocaleString('zh-CN');
-  ui.rCoins.textContent = String(coinCount);
-  ui.rDist.textContent = Math.floor(distance) + 'm';
+  lastFinal = Math.floor(score);
+  lastCoins = coinCount;
+  lastDist = distance;
+  const isNew = lastFinal > best;
+  if (isNew) { best = lastFinal; try { localStorage.setItem('pelican_ride_best_v1', String(best)); } catch (e) { /* ignore */ } }
+  ui.rScore.textContent = lastFinal.toLocaleString('zh-CN');
+  ui.rCoins.textContent = String(lastCoins);
+  ui.rDist.textContent = Math.floor(lastDist) + 'm';
   ui.rBest.textContent = best.toLocaleString('zh-CN');
   ui.newBest.classList.toggle('hidden', !isNew);
-  ui.overTitle.textContent = isNew ? '新纪录！' : (final > best * 0.6 ? '骑得不错！' : '再来一局？');
-  ui.menuBest.textContent = best.toLocaleString('zh-CN');
-  tone(330, 0.55, 'triangle', 0.09, -190);
+  ui.overTitle.textContent = isNew ? '新纪录！' : (lastFinal > best * 0.6 ? '骑得不错！' : '再来一局？');
+  // 本局新解锁的成就
+  const newly = meta.endRun();
+  if (ui.rAchv) {
+    ui.rAchv.innerHTML = newly.length
+      ? '<div class="r-achv-title">本局解锁成就</div>' + newly.map((a) => '<span class="achv-chip">' + a.icon + ' ' + a.name + '</span>').join('')
+      : '';
+  }
+  // 排行榜：达到门槛时可留名
+  if (ui.nameRow && ui.rRank) {
+    const qualifies = boardQualifies(lastFinal);
+    ui.nameRow.classList.toggle('hidden', !qualifies);
+    ui.rRank.classList.add('hidden');
+    if (qualifies) ui.playerName.value = getName();
+  }
+  updateMenuStats();
+  audio.over();
+}
+function saveScore() {
+  const name = (ui.playerName.value || '').trim().slice(0, 8) || '无名骑手';
+  setName(name);
+  const rank = boardAdd({ name, score: lastFinal, coins: lastCoins, dist: lastDist, date: Date.now() });
+  ui.nameRow.classList.add('hidden');
+  ui.rRank.classList.remove('hidden');
+  ui.rRank.textContent = rank > 0 ? '已登上海岸榜 · 当前第 ' + rank + ' 名' : '距离上榜还差一点';
+  audio.ui();
 }
 function toMenu() {
   setState('menu');
-  ui.menuBest.textContent = best.toLocaleString('zh-CN');
 }
 function togglePause() {
   if (state === 'playing') setState('paused');
@@ -299,14 +341,16 @@ function togglePause() {
 function cycleCamera() {
   camIndex = (camIndex + 1) % CAM_MODES.length;
   orbitYaw = 0; orbitPitch = 0;
-  tone(560, 0.09, 'sine', 0.05, 120);
+  meta.viewMode(camIndex);
+  audio.ui();
   updateHUD();
 }
 function tryJump() {
   if (state !== 'playing' || !grounded) return;
   jumpVel = 8.6; grounded = false;
+  meta.event('jump');
   fx.burst(playerX, 0.25, 0.5, 0xe9d8ae, 10, { speed: 2.2, life: 0.5, size: 0.14, gravity: 6, up: 0.6 });
-  tone(420, 0.16, 'triangle', 0.055, 380);
+  audio.jump();
 }
 function updateHUD() {
   ui.score.textContent = Math.floor(score).toLocaleString('zh-CN');
@@ -327,10 +371,10 @@ function smashObstacle(o) {
   fx.burst(x, 0.55, z, 0x8b989e, 14, { speed: 5.2, life: 1.1, size: 0.21, gravity: 12, spread: 0.6 });
   const gain = Math.round(30 * multiplier);
   score += gain;
+  meta.event('smash');
   floatText(x, 1.5, z, '撞碎 +' + gain, '#ffd166');
   shake = Math.max(shake, 0.24);
-  tone(170, 0.20, 'sawtooth', 0.07, -95);
-  tone(540, 0.13, 'square', 0.035, 240);
+  audio.smash();
   respawnObstacle(o);
 }
 function takeDamage() {
@@ -341,15 +385,17 @@ function takeDamage() {
   speed *= 0.55;
   shake = 0.62;
   damagePulse = 1;
+  meta.run.noHitDist = 0;
   ui.flash.style.opacity = '0.42';
   setTimeout(() => { ui.flash.style.opacity = '0'; }, 90);
   fx.burst(playerX, 1.2, 0, 0xff6b6b, 12, { speed: 3.5, life: 0.6, size: 0.20, gravity: 8 });
   floatText(playerX, 2.2, 0, '-1 ♥', '#ff6b6b');
-  tone(150, 0.32, 'square', 0.09, -80);
+  audio.hurt();
   renderHearts();
   if (hp <= 0) gameOver();
 }
 
+// ---------- 主循环 ----------
 function update(dt) {
   elapsed += dt;
   const active = state === 'playing';
@@ -361,7 +407,7 @@ function update(dt) {
     lean = lerp(lean, dir, 1 - Math.exp(-9 * dt));
 
     const wantBoost = !!(keys.ShiftLeft || keys.ShiftRight || touchBoost) && energy > 1;
-    if (wantBoost && !boosting) tone(240, 0.22, 'sawtooth', 0.035, 360);
+    if (wantBoost && !boosting) audio.boost();
     boosting = wantBoost;
     energy = clamp(energy + (boosting ? -20 : 0.9) * dt, 0, 100);
     magnetTime = Math.max(0, magnetTime - dt);
@@ -375,7 +421,7 @@ function update(dt) {
       if (jumpY <= 0) {
         jumpY = 0; jumpVel = 0; grounded = true;
         fx.burst(playerX, 0.18, 0.4, 0xe9d8ae, 12, { speed: 2.6, life: 0.55, size: 0.16, gravity: 7, up: 0.4 });
-        tone(180, 0.12, 'sine', 0.045, -60);
+        audio.land();
       }
     }
 
@@ -386,15 +432,24 @@ function update(dt) {
     score += speed * dt * 0.8;
     multiplier = Math.min(1 + Math.floor(combo / 6) * 0.5, 4) * (boosting ? 2 : 1);
 
+    // 成就数据
+    meta.run.score = score;
+    meta.run.dist = distance;
+    if (combo > meta.run.bestCombo) meta.run.bestCombo = combo;
+    if (boosting) meta.run.boostTime += dt;
+    meta.run.noHitDist += speed * dt;
+
     trailTick += dt;
     if (boosting && trailTick > 0.07) {
       trailTick = 0;
       fx.burst(playerX + rand(-0.35, 0.35), rand(0.3, 1.3), rand(1.0, 2.3), 0xffe3a0, 2,
         { speed: 1.2, life: 0.5, size: 0.13, gravity: 1.0, up: 0.5, spread: 0.25 });
     }
+    audio.setWind(clamp((speed - 14) / 26, 0, 1) * (boosting ? 1 : 0.35));
   } else {
     boosting = false;
     lean = lerp(lean, 0, 1 - Math.exp(-4 * dt));
+    audio.setWind(0.05);
   }
 
   const v = active ? speed : ambient;
@@ -426,9 +481,10 @@ function update(dt) {
         score += gain; coinCount++;
         combo++; comboTimer = 2.1;
         energy = clamp(energy + 4.2, 0, 100);
+        meta.event('coin');
         fx.burst(c.x, c.y, c.z, 0xffd54a, 7, { speed: 2.8, life: 0.55, size: 0.15, gravity: 3, spread: 0.25 });
         floatText(c.x, c.y, c.z, '+' + gain);
-        tone(760 + Math.min(combo, 20) * 26, 0.13, 'triangle', 0.055, 320);
+        audio.coin(combo);
         respawnCoin(c);
         continue;
       }
@@ -458,22 +514,24 @@ function update(dt) {
       const px = p.x, pz = p.z;
       p.alive = false;
       if (isHealth) {
+        meta.event('health');
         if (hp < MAX_HP) {
           hp++;
           floatText(px, 1.7, pz, '+1 ♥', '#7be08a');
           fx.burst(px, 1.3, pz, 0x6fdd92, 16, { speed: 3.2, life: 0.9, size: 0.19, gravity: -1.2, up: 1.4 });
-          tone(660, 0.22, 'sine', 0.07, 340);
+          audio.heal();
           renderHearts();
         } else {
           score += 50;
           floatText(px, 1.7, pz, '+50', '#ffd166');
-          tone(700, 0.16, 'triangle', 0.055, 260);
+          audio.heal();
         }
       } else {
         magnetTime = 8;
+        meta.event('magnet');
         floatText(px, 1.7, pz, '磁铁!', '#7ff0ff');
         fx.burst(px, 1.3, pz, 0x6fe4ff, 14, { speed: 3.0, life: 0.8, size: 0.18, gravity: 2 });
-        tone(880, 0.28, 'sine', 0.07, 420);
+        audio.magnet();
       }
       respawnPickup(p);
     }
@@ -481,8 +539,10 @@ function update(dt) {
 
   fx.update(dt, v);
 
+  // 相机：开场慢速滑入，之后正常跟随
   const f = cameraFrame();
-  const k = 1 - Math.exp(-6 * dt);
+  if (introT > 0) introT = Math.max(0, introT - dt);
+  const k = 1 - Math.exp(-(introT > 0 ? 2.2 : 6) * dt);
   camera.position.lerp(f.pos, k);
   if (shake > 0.002) {
     camera.position.x += (Math.random() - 0.5) * shake;
@@ -491,6 +551,7 @@ function update(dt) {
   }
   camLook.lerp(f.look, k);
   camera.lookAt(camLook);
+  camera.rotateZ(-lean * 0.035);
   const fovTarget = CAM_MODES[camIndex].fov + (boosting ? 6 : 0);
   camera.fov = lerp(camera.fov, fovTarget, k);
   camera.updateProjectionMatrix();
@@ -503,9 +564,14 @@ function update(dt) {
   }
 
   hudTick += dt;
-  if (hudTick > 0.07) { hudTick = 0; updateHUD(); }
+  if (hudTick > 0.07) {
+    hudTick = 0;
+    updateHUD();
+    meta.evaluate();
+  }
 }
 
+// ---------- 输入 ----------
 function bindHold(el, on, off) {
   el.addEventListener('pointerdown', (e) => {
     e.preventDefault();
@@ -541,6 +607,7 @@ ui.canvas.addEventListener('wheel', (e) => {
   orbitDist = clamp(orbitDist + e.deltaY * 0.0012, 0.55, 2.4);
 }, { passive: false });
 
+// ---------- 按钮 ----------
 $('btn-start').addEventListener('click', startGame);
 $('btn-restart').addEventListener('click', startGame);
 $('btn-resume').addEventListener('click', togglePause);
@@ -548,6 +615,41 @@ $('btn-quit').addEventListener('click', toMenu);
 $('btn-menu').addEventListener('click', toMenu);
 $('btn-cam').addEventListener('click', cycleCamera);
 $('btn-pause').addEventListener('click', togglePause);
+$('btn-save-score').addEventListener('click', saveScore);
+ui.playerName.addEventListener('keydown', (e) => {
+  e.stopPropagation();
+  if (e.key === 'Enter') saveScore();
+});
+
+function toggleSound() {
+  audio.ensure();
+  const on = audio.toggle();
+  ui.sound.textContent = on ? '🔊' : '🔇';
+}
+ui.sound.addEventListener('click', toggleSound);
+
+// 排行榜 / 成就面板（可从首页或暂停中打开）
+function openPanel(which) {
+  audio.ui();
+  if (which === 'board') {
+    meta.renderBoardPanel();
+    ui.screenBoard.classList.remove('hidden');
+  } else {
+    meta.renderAchvPanel();
+    ui.screenAchv.classList.remove('hidden');
+  }
+}
+function closePanel(which) {
+  audio.ui();
+  if (which === 'board') ui.screenBoard.classList.add('hidden');
+  else ui.screenAchv.classList.add('hidden');
+}
+$('btn-board').addEventListener('click', () => openPanel('board'));
+$('btn-achv').addEventListener('click', () => openPanel('achv'));
+$('btn-pause-board').addEventListener('click', () => openPanel('board'));
+$('btn-pause-achv').addEventListener('click', () => openPanel('achv'));
+$('btn-board-back').addEventListener('click', () => closePanel('board'));
+$('btn-achv-back').addEventListener('click', () => closePanel('achv'));
 
 window.addEventListener('keydown', (e) => {
   keys[e.code] = true;
@@ -555,9 +657,11 @@ window.addEventListener('keydown', (e) => {
   if (e.repeat) return;
   if (e.code === 'Space') tryJump();
   else if (e.code === 'KeyC') cycleCamera();
+  else if (e.code === 'KeyM') toggleSound();
   else if (e.code === 'KeyP' || e.code === 'Escape') togglePause();
   else if (e.code === 'KeyR' && state === 'gameover') startGame();
   else if (e.code === 'Enter' && state === 'menu') startGame();
+  audio.ensure();
 });
 window.addEventListener('keyup', (e) => { keys[e.code] = false; });
 window.addEventListener('blur', () => {
@@ -580,14 +684,22 @@ resetPools();
 resetGame();
 setState('menu');
 ui.menuBest.textContent = best.toLocaleString('zh-CN');
+if (ui.menuSummary) ui.menuSummary.textContent = meta.summary();
 ui.damage.style.opacity = '0';
 
+// ---------- 调试钩子（自动化验证用） ----------
 window.__pelicanDebug = () => ({
   state, camIndex, hp, score: Math.floor(score), boosting,
+  achv: meta.unlockedCount(), boardLen: loadBoard().length,
   orbitYaw: +orbitYaw.toFixed(3), orbitPitch: +orbitPitch.toFixed(3),
   orbitDist: +orbitDist.toFixed(3), jumpY: +jumpY.toFixed(2),
   camX: +camera.position.x.toFixed(2), camZ: +camera.position.z.toFixed(2),
 });
+window.__pelicanTest = {
+  end: () => gameOver(),
+  unlock: () => { meta.run.coins = 999; meta.run.smashed = 999; meta.evaluate(); },
+  board: () => loadBoard(),
+};
 
 const clock = new THREE.Clock();
 function frame() {

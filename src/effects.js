@@ -22,7 +22,8 @@ export function createEffects(scene) {
       void main(){
         vC = aColor; vA = aAlpha;
         vec4 mv = modelViewMatrix * vec4(position, 1.0);
-        gl_PointSize = aSize * (320.0 / max(1.0, -mv.z));
+        // 贴近镜头时限制最大尺寸，否则粒子会糊成一大团
+        gl_PointSize = clamp(aSize * (320.0 / max(0.9, -mv.z)), 1.0, 64.0);
         gl_Position = projectionMatrix * mv;
       }`,
     fragmentShader: `
